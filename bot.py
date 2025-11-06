@@ -149,21 +149,27 @@ class BloodborneCog(commands.Cog):
         }
 
     def _embed_from_results(self, author: discord.abc.User, inputs, pairs):
+        def _norm_label(label: str) -> str:
+            # Remove trailing colon, trim spaces, lowercase for stable lookups
+            base = label.split(":", 1)[0].strip()
+            return base.casefold()
+
         vit, end, strn, skl, bld, arc = inputs
 
         emoji_map = {
-            "Health": "❤️",
-            "Health (Phantom)": "👻",
-            "Stamina": "⚡",
-            "Stamina/Second": "🔁",
-            "Discovery": "🔍",
-            "Defense": "🛡️",
-            "Slow Poison Resist": "☠️",
-            "Rapid Poison Resist": "💀",
-            "Frenzy Resist": "🧠",
-            "Beasthood": "🐺",
-            "Max Vials": "💉",
-            "Max Bullets": "🔫"
+            # keys MUST be normalized with _norm_label(...) as below
+            _norm_label("Health"): "❤️",
+            _norm_label("Health (Phantom)"): "👻",
+            _norm_label("Stamina"): "⚡",
+            _norm_label("Stamina/Second"): "🔁",
+            _norm_label("Discovery"): "🔍",
+            _norm_label("Defense"): "🛡️",
+            _norm_label("Slow Poison Resist"): "☠️",
+            _norm_label("Rapid Poison Resist"): "💀",
+            _norm_label("Frenzy Resist"): "🧠",
+            _norm_label("Beasthood"): "🐺",
+            _norm_label("Max Vials"): "💉",
+            _norm_label("Max Bullets"): "🔫",
         }
 
         em = discord.Embed(
@@ -190,17 +196,27 @@ class BloodborneCog(commands.Cog):
         )
 
         # Format outputs with emoji and split into columns
+        unknown_labels = []
         formatted = []
-        for label, val in pairs:
-            emoji = emoji_map.get(label.strip(), "▫️")
-            formatted.append(f"{emoji} **{label}**: `{val}`")
+        for raw_label, val in pairs:
+            key = _norm_label(raw_label)   # <— normalize “Health:” → “health”
+            emoji = emoji_map.get(key)
+            if not emoji:
+                unknown_labels.append(raw_label)
+                emoji = "▫️"               # graceful fallback
+            # Show the label exactly as it appears in the sheet (colons and all)
+            formatted.append(f"{emoji} **{raw_label}**: `{val}`")
 
         mid = (len(formatted) + 1) // 2
         left = "\n".join(formatted[:mid]) or "—"
         right = "\n".join(formatted[mid:]) or "—"
 
         em.add_field(name="🩸 Hunter Stats", value=left, inline=True)
-        em.add_field(name="\u200b", value=right, inline=True)  # keeps two-column layout
+        em.add_field(name="\u200b", value=right, inline=True)
+
+        # Optional: print unknowns once so you can extend the map if the sheet changes
+        if unknown_labels:
+            print("[BB] Unmapped labels from sheet:", unknown_labels)
 
         em.set_footer(text=random.choice(HUNTER_QUOTES))
         return em
