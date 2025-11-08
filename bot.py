@@ -28,7 +28,7 @@ HUNTER_QUOTES = [
     "The moon is close. It will be a long hunt tonight."
 ]
 
-SPREADSHEET_ID = "1y5WN1PJjcg21sXtITiB5bNyWhMcbyQFyPaEwNwYFRHE"
+SPREADSHEET_ID = "1XBU-RPTLbsomlxjdc14SdkwWpn0lPa0lenTWUZjoaMs"
 BASE_SHEET_TITLE = "Character Sheet"  # template tab to duplicate
 GOOGLE_CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_JSON")  # path to service account json
 
