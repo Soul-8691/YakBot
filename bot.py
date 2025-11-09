@@ -76,6 +76,158 @@ class BloodborneCog(commands.Cog):
 
     # ---------- helpers ----------
 
+    # ===== Gear data sources =====
+
+    def _get_rune_choices(self) -> list[str]:
+        """Rune names from 'Rune Data'!A2:A67."""
+        ws = self.sh.worksheet("Rune Data")
+        col = ws.get("A2:A67")
+        return [r[0] for r in col if r and r[0]]
+
+    def _get_oath_choices(self) -> list[str]:
+        """Oath names from 'Rune Data'!A68:A73."""
+        ws = self.sh.worksheet("Rune Data")
+        col = ws.get("A68:A73")
+        return [r[0] for r in col if r and r[0]]
+
+    def _get_armor_choices(self) -> list[str]:
+        """Armor piece names from 'Armor Data'!A2:A131."""
+        ws = self.sh.worksheet("Armor Data")
+        col = ws.get("A2:A131")
+        return [r[0] for r in col if r and r[0]]
+
+
+    # ===== Set gear on a user's personal worksheet =====
+
+    def _set_gear(self, ws, rune1: str | None, rune2: str | None, rune3: str | None,
+                oath: str | None, head: str | None, chest: str | None,
+                arms: str | None, legs: str | None):
+        """
+        Write runes/oath/armor to Q2:Q9 on the user's worksheet.
+        Q2-4 = runes 1..3, Q5=oath, Q6-9=head,chest,arms,legs (in that order).
+        Accepts None to "leave as-is" (writes current cell back).
+        """
+        # Read existing values so None leaves the current value untouched.
+        current = ws.get("Q2:Q9")  # 8x1 (or [] if empty)
+        def cur(i):
+            try:
+                return current[i][0]
+            except Exception:
+                return ""
+
+        values = [
+            [rune1 if rune1 is not None else cur(0)],
+            [rune2 if rune2 is not None else cur(1)],
+            [rune3 if rune3 is not None else cur(2)],
+            [oath  if oath  is not None else cur(3)],
+            [head  if head  is not None else cur(4)],
+            [chest if chest is not None else cur(5)],
+            [arms  if arms  is not None else cur(6)],
+            [legs  if legs  is not None else cur(7)],
+        ]
+        ws.update("Q2:Q9", values, value_input_option="USER_ENTERED")
+
+    def _emoji_for_header(self, name: str) -> str:
+        n = (name or "").lower()
+        # common patterns for stat columns
+        if "base" in n: return "📘"
+        if "bonus" in n or "mod" in n: return "➕"
+        if "total" in n or "final" in n: return "🏁"
+        if "def" in n or "defense" in n: return "🛡️"
+        if "res" in n or "resist" in n: return "🧪"
+        if "dmg" in n or "damage" in n: return "🗡️"
+        return "📊"
+
+    def _emoji_for_row(self, name: str) -> str:
+        n = (name or "").lower()
+        # broad Bloodborne-ish mapping; falls back to a dot if no match
+        if "physical" in n: return "⚔️"
+        if "blood" in n: return "🩸"
+        if "arcane" in n: return "✨"
+        if "fire" in n: return "🔥"
+        if "bolt" in n or "thunder" in n: return "⚡"
+        if "poison" in n: return "☠️"
+        if "frenzy" in n: return "🌀"
+        if "beast" in n: return "🐺"
+        if "hp" in n or "vital" in n: return "❤️"
+        if "stamina" in n or "endur" in n: return "💨"
+        if "def" in n: return "🛡️"
+        if "resist" in n: return "🧪"
+        return "•"
+
+    def _format_table_embed_sections(self, headers: list[str], row_names: list[str], data: list[list[str]]):
+        """
+        Build 3 inline embed fields, one for each header column in U3:W3.
+        Values are rendered as emoji-labeled rows using names from T4:T11.
+        Returns: list[tuple[name, value, inline_bool]]
+        """
+        # ensure exactly 3 columns
+        cols = 3
+        for i in range(len(data)):
+            data[i] = (data[i] + [""] * cols)[:cols]
+        if len(headers) < cols:
+            headers = headers + [f"Col {i+1}" for i in range(len(headers), cols)]
+
+        # compose each column text as lines
+        fields = []
+        for j in range(cols):
+            h_emoji = self._emoji_for_header(headers[j])
+            lines = []
+            for r, rn in enumerate(row_names):
+                emoji = self._emoji_for_row(rn)
+                cell = data[r][j] if r < len(data) and j < len(data[r]) else ""
+                # Format: ":emoji: Row Name — Value"
+                line = f"{emoji} {rn}: **{cell}**" if cell != "" else f"{emoji} {rn}: —"
+                lines.append(line)
+            value = "\n".join(lines)
+            fields.append((f"{h_emoji} {headers[j]}", value, True))
+        return fields
+
+    # ===== Read the computed table and format it for an embed =====
+
+    def _read_gear_table(self, ws):
+        """
+        Returns headers (list[str]), row_names (list[str]), data (list[list[str]])
+        from U3:W3 (headers), T4:T11 (row names), U4:W11 (table).
+        """
+        headers_row = []
+        headers_row.append(ws.get("T2")[0][0])
+        headers_row.append(ws.get("V2")[0][0])
+        headers_row.append(ws.get("W2")[0][0])
+        headers_row = [headers_row]
+        headers = headers_row[0] if headers_row else []
+        row_names_col = ws.get("T4:T11") or []
+        row_names = [r[0] if r else "" for r in row_names_col]
+        data = ws.get("U4:W11") or []
+        # Normalize row lengths to exactly 3 columns
+        data = [row + [""] * (3 - len(row)) for row in data]
+        return headers, row_names, data
+
+    def _format_table_monospace(self, headers: list[str], row_names: list[str], data: list[list[str]]) -> str:
+        """
+        Builds a neat monospace table as a code block for Discord embeds.
+        """
+        # Compute column widths
+        name_w = max([len("Name")] + [len(n or "") for n in row_names])
+        col_w = [0, 0, 0]
+        for j in range(3):
+            col_w[j] = max(len(headers[j] if len(headers) > j else f"Col{j+1}"),
+                        *[len((r[j] if len(r) > j else "") or "") for r in data])
+
+        # Header
+        h_line = f"{'Name'.ljust(name_w)} | " + " | ".join([(headers[i] if i < len(headers) else f'Col{i+1}').ljust(col_w[i]) for i in range(3)])
+        sep = "-" * len(h_line)
+
+        # Rows
+        rows = []
+        for i, rn in enumerate(row_names):
+            cells = data[i] if i < len(data) else ["", "", ""]
+            row = f"{(rn or '').ljust(name_w)} | " + " | ".join([(cells[j] if j < len(cells) else "").ljust(col_w[j]) for j in range(3)])
+            rows.append(row)
+
+        body = "\n".join(rows)
+        return f"```\n{h_line}\n{sep}\n{body}\n```"
+
     def _user_tab_name(self, user_id: int) -> str:
         return f"u_{user_id}"
 
@@ -266,6 +418,129 @@ class BloodborneCog(commands.Cog):
 
     # ---------- slash commands ----------
 
+    @app_commands.command(
+        name="bb_gear",
+        description="Choose runes, oath, and armor; shows your selected inputs and computed gear table."
+    )
+    @app_commands.describe(
+        rune1="Rune slot 1",
+        rune2="Rune slot 2",
+        rune3="Rune slot 3",
+        oath="Oath",
+        head="Head armor",
+        chest="Chest armor",
+        arms="Arm/Glove armor",
+        legs="Leg armor"
+    )
+    async def bb_gear(
+        self,
+        interaction: discord.Interaction,
+        rune1: str | None = None,
+        rune2: str | None = None,
+        rune3: str | None = None,
+        oath: str | None = None,
+        head: str | None = None,
+        chest: str | None = None,
+        arms: str | None = None,
+        legs: str | None = None
+    ):
+        await interaction.response.defer(ephemeral=False)
+
+        # Player's personal worksheet
+        ws = self._ensure_user_tab(interaction.user.id)
+
+        # Validate against sheet-driven choices
+        runes_valid = set(self._get_rune_choices())
+        oaths_valid = set(self._get_oath_choices())
+        armor_valid = set(self._get_armor_choices())
+
+        bad = []
+        if rune1 is not None and rune1 not in runes_valid: bad.append(f"Rune1: {rune1}")
+        if rune2 is not None and rune2 not in runes_valid: bad.append(f"Rune2: {rune2}")
+        if rune3 is not None and rune3 not in runes_valid: bad.append(f"Rune3: {rune3}")
+        if oath  is not None and oath  not in oaths_valid: bad.append(f"Oath: {oath}")
+        if head  is not None and head  not in armor_valid: bad.append(f"Head: {head}")
+        if chest is not None and chest not in armor_valid: bad.append(f"Chest: {chest}")
+        if arms  is not None and arms  not in armor_valid: bad.append(f"Arms: {arms}")
+        if legs  is not None and legs  not in armor_valid: bad.append(f"Legs: {legs}")
+
+        if bad:
+            await interaction.followup.send(
+                "Some choices aren't valid:\n• " + "\n• ".join(bad),
+                ephemeral=True
+            )
+            return
+
+        # Write to Q2:Q9 (None = keep existing)
+        self._set_gear(ws, rune1, rune2, rune3, oath, head, chest, arms, legs)
+
+        # Re-read inputs so we show what’s actually set in the sheet
+        q_values = ws.get("Q2:Q9")
+        q_values = [q[0] if q else "" for q in q_values]
+        rune1, rune2, rune3, oath, head, chest, arms, legs = (q_values + [""] * 8)[:8]
+
+        # Compute table sections for embed fields
+        headers, row_names, data = self._read_gear_table(ws)
+        sections = self._format_table_embed_sections(headers, row_names, data)
+
+        # Build a compact, emoji-forward embed
+        em = discord.Embed(
+            title="🩸 Bloodborne — Runes, Oath & Armor",
+            description="Your selections and computed effects:",
+            color=0x8A0303
+        )
+
+        # Selections block with emojis
+        selections = (
+            f"🧿 **Runes:** {rune1 or '—'} • {rune2 or '—'} • {rune3 or '—'}\n"
+            f"🗳️ **Oath:** {oath or '—'}\n"
+            f"🪖 **Head:** {head or '—'}\n"
+            f"🛡️ **Chest:** {chest or '—'}\n"
+            f"🧤 **Arms:** {arms or '—'}\n"
+            f"🥾 **Legs:** {legs or '—'}"
+        )
+        user = interaction.user  # this gives you the Discord user object
+        em = discord.Embed(
+            title="🩸 Bloodborne — Runes, Oath & Armor",
+            description="Your selections and computed effects:",
+            color=0x8A0303
+        )
+        em.set_author(name=f"{user.display_name}", icon_url=user.display_avatar.url)
+        em.add_field(name="Loadout", value=selections, inline=False)
+
+        # Add the three computed columns as inline fields
+        for name, value, inline in sections:
+            # Prevent empty field bodies
+            em.add_field(name=name, value=value or "—", inline=inline)
+
+        await interaction.followup.send(embed=em)
+
+    @bb_gear.autocomplete("rune1")
+    @bb_gear.autocomplete("rune2")
+    @bb_gear.autocomplete("rune3")
+    async def bb_gear_rune_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_rune_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
+
+    @bb_gear.autocomplete("oath")
+    async def bb_gear_oath_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_oath_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
+
+    @bb_gear.autocomplete("head")
+    @bb_gear.autocomplete("chest")
+    @bb_gear.autocomplete("arms")
+    @bb_gear.autocomplete("legs")
+    async def bb_gear_armor_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_armor_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
+
     @app_commands.command(name="bb_set", description="Compute your Bloodborne build from your stats.")
     async def bb_set(
         self,
@@ -337,7 +612,7 @@ class BloodborneCog(commands.Cog):
             inputs = cached["inputs"]
             pairs = list(cached["results"].items())
 
-        level, origin_from_sheet = self._read_level_and_origin()
+        level, origin_from_sheet = self._read_level_and_origin(ws)
         embed = self._embed_from_results(interaction.user, inputs, pairs, level=level, origin=origin_from_sheet)
         await interaction.followup.send(embed=embed)
 
