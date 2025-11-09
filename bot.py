@@ -90,10 +90,28 @@ class BloodborneCog(commands.Cog):
         col = ws.get("A68:A73")
         return [r[0] for r in col if r and r[0]]
 
-    def _get_armor_choices(self) -> list[str]:
+    def _get_head_armor_choices(self) -> list[str]:
         """Armor piece names from 'Armor Data'!A2:A131."""
         ws = self.sh.worksheet("Armor Data")
-        col = ws.get("A2:A131")
+        col = ws.get("A2:A37")
+        return [r[0] for r in col if r and r[0]]
+
+    def _get_chest_armor_choices(self) -> list[str]:
+        """Armor piece names from 'Armor Data'!A2:A131."""
+        ws = self.sh.worksheet("Armor Data")
+        col = ws.get("A38:A72")
+        return [r[0] for r in col if r and r[0]]
+
+    def _get_arms_armor_choices(self) -> list[str]:
+        """Armor piece names from 'Armor Data'!A2:A131."""
+        ws = self.sh.worksheet("Armor Data")
+        col = ws.get("A73:A99")
+        return [r[0] for r in col if r and r[0]]
+
+    def _get_legs_armor_choices(self) -> list[str]:
+        """Armor piece names from 'Armor Data'!A2:A131."""
+        ws = self.sh.worksheet("Armor Data")
+        col = ws.get("A100:A131")
         return [r[0] for r in col if r and r[0]]
 
 
@@ -452,17 +470,20 @@ class BloodborneCog(commands.Cog):
         # Validate against sheet-driven choices
         runes_valid = set(self._get_rune_choices())
         oaths_valid = set(self._get_oath_choices())
-        armor_valid = set(self._get_armor_choices())
+        head_armor_valid = set(self._get_head_armor_choices())
+        chest_armor_valid = set(self._get_chest_armor_choices())
+        arms_armor_valid = set(self._get_arms_armor_choices())
+        legs_armor_valid = set(self._get_legs_armor_choices())
 
         bad = []
         if rune1 is not None and rune1 not in runes_valid: bad.append(f"Rune1: {rune1}")
         if rune2 is not None and rune2 not in runes_valid: bad.append(f"Rune2: {rune2}")
         if rune3 is not None and rune3 not in runes_valid: bad.append(f"Rune3: {rune3}")
         if oath  is not None and oath  not in oaths_valid: bad.append(f"Oath: {oath}")
-        if head  is not None and head  not in armor_valid: bad.append(f"Head: {head}")
-        if chest is not None and chest not in armor_valid: bad.append(f"Chest: {chest}")
-        if arms  is not None and arms  not in armor_valid: bad.append(f"Arms: {arms}")
-        if legs  is not None and legs  not in armor_valid: bad.append(f"Legs: {legs}")
+        if head  is not None and head  not in head_armor_valid: bad.append(f"Head: {head}")
+        if chest is not None and chest not in chest_armor_valid: bad.append(f"Chest: {chest}")
+        if arms  is not None and arms  not in arms_armor_valid: bad.append(f"Arms: {arms}")
+        if legs  is not None and legs  not in legs_armor_valid: bad.append(f"Legs: {legs}")
 
         if bad:
             await interaction.followup.send(
@@ -532,11 +553,29 @@ class BloodborneCog(commands.Cog):
         return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
 
     @bb_gear.autocomplete("head")
+    async def bb_gear_armor_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_head_armor_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
+    
     @bb_gear.autocomplete("chest")
+    async def bb_gear_armor_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_chest_armor_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
+    
     @bb_gear.autocomplete("arms")
+    async def bb_gear_armor_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_arms_armor_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
+    
     @bb_gear.autocomplete("legs")
     async def bb_gear_armor_autocomplete(self, interaction: discord.Interaction, current: str):
-        choices = self._get_armor_choices()
+        choices = self._get_legs_armor_choices()
         cur = (current or "").lower()
         filtered = [c for c in choices if cur in c.lower()] if cur else choices
         return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
