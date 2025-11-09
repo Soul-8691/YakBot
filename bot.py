@@ -115,6 +115,42 @@ class BloodborneCog(commands.Cog):
             pairs.append((labels[i], values[i]))
         return pairs
 
+    # import gspread at top if not already:
+    # import gspread
+
+    def _get_origin_choices(self) -> list[str]:
+        """Read Origin names from 'Origin Data' B1:J1."""
+        ws = self.sh.worksheet("Origin Data")
+        row = ws.get("B1:J1")
+        if not row:
+            return []
+        return [c for c in row[0] if c]
+
+    def _set_origin(self, ws, origin: str):
+        """
+        Write the chosen Origin into the user's worksheet (cell J2, which may be merged with K2).
+        `ws` is the user's personal worksheet, passed in from _ensure_user_tab().
+        """
+        import gspread
+        try:
+            # Use a 2D list in case the J2:K2 range is merged; this avoids 400 API errors.
+            ws.update("J2:K2", [[origin, ""]], value_input_option="USER_ENTERED")
+        except gspread.exceptions.APIError:
+            # Fallback if single-cell write is needed (e.g. unmerged cell)
+            ws.update_acell("J2", origin)
+
+    def _read_level_and_origin(self, ws) -> tuple[str | None, str | None]:
+        """Return (Level, Origin) from the user's worksheet."""
+        try:
+            level = ws.acell("J5").value
+        except Exception:
+            level = None
+        try:
+            origin = ws.acell("J2").value
+        except Exception:
+            origin = None
+        return level, origin
+
     async def _save_cache(self, user_id: int, stats, pairs, tab_name):
         import json
         (vit, end, strn, skl, bld, arc) = stats
@@ -148,7 +184,7 @@ class BloodborneCog(commands.Cog):
             "tab": tab
         }
 
-    def _embed_from_results(self, author: discord.abc.User, inputs, pairs):
+    def _embed_from_results(self, author: discord.abc.User, inputs, pairs, level: str | None = None, origin: str | None = None):
         def _norm_label(label: str) -> str:
             # Remove trailing colon, trim spaces, lowercase for stable lookups
             base = label.split(":", 1)[0].strip()
@@ -172,9 +208,16 @@ class BloodborneCog(commands.Cog):
             _norm_label("Max Bullets"): "🔫",
         }
 
+        details = []
+        if origin:
+            details.append(f"**Origin:** {origin}")
+        if level:
+            details.append(f"**Level:** {level}")
+        details_line = (" • ".join(details)) if details else "Stats calculated from your **Character Sheet** sheet."
+
         em = discord.Embed(
             title="🩸 Bloodborne — Hunter Build",
-            description=f"{DIVIDER}\nStats calculated from your **Character Sheet** sheet.\n{DIVIDER}",
+            description=f"{DIVIDER}\n{details_line}\n{DIVIDER}",
             color=BLOODBORNE_RED
         )
         em.timestamp = datetime.utcnow()
@@ -224,14 +267,6 @@ class BloodborneCog(commands.Cog):
     # ---------- slash commands ----------
 
     @app_commands.command(name="bb_set", description="Compute your Bloodborne build from your stats.")
-    @app_commands.describe(
-        vitality="Vitality (int)",
-        endurance="Endurance (int)",
-        strength="Strength (int)",
-        skill="Skill (int)",
-        bloodtinge="Bloodtinge (int)",
-        arcane="Arcane (int)"
-    )
     async def bb_set(
         self,
         interaction: discord.Interaction,
@@ -240,32 +275,46 @@ class BloodborneCog(commands.Cog):
         strength: int,
         skill: int,
         bloodtinge: int,
-        arcane: int
+        arcane: int,
+        origin: str | None = None
     ):
-        await interaction.response.defer(ephemeral=False, thinking=True)
-        if not self.ready:
-            return await interaction.followup.send("DB is still initializing. Try again in a moment.")
+        await interaction.response.defer()
 
-        # 1) Ensure user tab
+        # 1. Ensure user's personal worksheet
         ws = self._ensure_user_tab(interaction.user.id)
 
-        # 2) Write inputs
-        self._write_inputs(ws, vitality, endurance, strength, skill, bloodtinge, arcane)
+        # 2. If an origin was chosen, write it to Character Sheet
+        if origin:
+            self._set_origin(ws, origin)
 
-        # 3) Read outputs
-        pairs = self._read_outputs(ws)
+        # 3. Write input stats
+        ws.update("L8:L13", [[vitality], [endurance], [strength], [skill], [bloodtinge], [arcane]])
 
-        # 4) Save cache
-        await self._save_cache(
-            user_id=interaction.user.id,
-            stats=(vitality, endurance, strength, skill, bloodtinge, arcane),
-            pairs=pairs,
-            tab_name=ws.title
+        # 4. Read output values from O2:O13 (your existing helper)
+        pairs = self._read_outputs(ws)  # ← THIS must come before using 'pairs'
+
+        # 5. Read Level & Origin from Character Sheet
+        level, origin_from_sheet = self._read_level_and_origin(ws)
+
+        # 6. Build and send the embed
+        embed = self._embed_from_results(
+            interaction.user,
+            (vitality, endurance, strength, skill, bloodtinge, arcane),
+            pairs,
+            level=level,
+            origin=origin_from_sheet
         )
 
-        # 5) Pretty embed
-        embed = self._embed_from_results(interaction.user, (vitality, endurance, strength, skill, bloodtinge, arcane), pairs)
         await interaction.followup.send(embed=embed)
+
+    @bb_set.autocomplete("origin")
+    async def bb_set_origin_autocomplete(self, interaction: discord.Interaction, current: str):
+        # Pull choices from the sheet and filter by user input
+        choices = self._get_origin_choices()
+        current_lower = (current or "").lower()
+        filtered = [c for c in choices if current_lower in c.lower()] if current_lower else choices
+        # Discord allows up to 25 items in autocomplete
+        return [app_commands.Choice(name=o, value=o) for o in filtered[:25]]
 
     @app_commands.command(name="bb_show", description="Show your last computed Bloodborne build.")
     @app_commands.describe(fresh="Recompute from Sheets instead of showing cached result.")
@@ -279,17 +328,17 @@ class BloodborneCog(commands.Cog):
             return await interaction.followup.send("No cached build yet. Use `/bb_set` first.")
 
         if fresh or not cached:
-            # Force re-pull from their tab
             ws = self._ensure_user_tab(interaction.user.id)
-            # Read inputs from L8-L13 to display in the embed
             inputs = [int(v[0]) for v in ws.get("L8:L13")]
             pairs = self._read_outputs(ws)
             await self._save_cache(interaction.user.id, tuple(inputs), pairs, ws.title)
         else:
+            ws = self._ensure_user_tab(interaction.user.id)  # ensure we can read J2/J5 even if using cache
             inputs = cached["inputs"]
             pairs = list(cached["results"].items())
 
-        embed = self._embed_from_results(interaction.user, inputs, pairs)
+        level, origin_from_sheet = self._read_level_and_origin()
+        embed = self._embed_from_results(interaction.user, inputs, pairs, level=level, origin=origin_from_sheet)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="bb_delete", description="Delete your personal sheet tab & cached build.")
