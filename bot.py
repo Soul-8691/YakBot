@@ -15,6 +15,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import random
 from datetime import datetime
+import math
 
 BLOODBORNE_RED = 0x7A0A0A  # deep, grim red
 DIVIDER = "┄┄┄┄┄┄┄┄┄┄"      # thin gothic line
@@ -30,6 +31,8 @@ HUNTER_QUOTES = [
 
 SPREADSHEET_ID = "1XBU-RPTLbsomlxjdc14SdkwWpn0lPa0lenTWUZjoaMs"
 BASE_SHEET_TITLE = "Character Sheet"  # template tab to duplicate
+_ENEMY_SPREADSHEET_ID = "1KWBYOU-2HtYNpFNDtYfxlPGqxRZgmJGeSabQVsVRNdo"
+_ENEMY_SHEET_NAME = "enemydata"
 GOOGLE_CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_JSON")  # path to service account json
 
 logging.basicConfig(level=logging.INFO)
@@ -75,6 +78,102 @@ class BloodborneCog(commands.Cog):
         self.ready = True
 
     # ---------- helpers ----------
+
+    def _enemy_ws(self):
+        """Return the 'enemydata' worksheet from the separate spreadsheet."""
+        other = self.gc.open_by_key(_ENEMY_SPREADSHEET_ID)
+        return other.worksheet(_ENEMY_SHEET_NAME)
+
+    def _get_enemy_choices(self) -> list[tuple[str, int]]:
+        """
+        Returns [(label, row_index)], where label is 'Name (Location)' and row_index is the actual row (3..296).
+        Source:
+        Names: A3:A296
+        Locations: B3:B296
+        """
+        ws = self._enemy_ws()
+        names = ws.get("A3:A296") or []
+        locs  = ws.get("B3:B296") or []
+        out = []
+        for i in range(max(len(names), len(locs))):
+            name = names[i][0] if i < len(names) and names[i] else ""
+            loc  = locs[i][0]  if i < len(locs)  and locs[i]  else ""
+            if not name:
+                continue
+            label = f"{name} ({loc})" if loc else name
+            row_index = 3 + i  # because A3 is the first
+            out.append((label, row_index))
+        return out
+
+    def _apply_enemy_matchup(self, ws_player, enemy_row: int):
+        """
+        For the chosen enemy row (F..L @ row), write those 7 values into T36..T42 on the player's worksheet.
+        Mapping: F->T36, G->T37, H->T38, I->T39, J->T40, K->T41, L->T42
+        """
+        ws_e = self._enemy_ws()
+        row = enemy_row
+        vals_row = ws_e.get(f"F{row}:L{row}") or [[]]
+        vals = vals_row[0] if vals_row else []
+        # Ensure 7 values
+        vals = (vals + [""] * 7)[:7]
+        ws_player.update("T36:T42", [[v] for v in vals], value_input_option="USER_ENTERED")
+
+    def _read_damage_summary(self, ws) -> tuple[str | None, str | None]:
+        """
+        Returns (Unmitigated PhysAtk U17, Total Final Dmg U43) from the player's worksheet.
+        """
+        try:
+            u17 = ws.acell("U17").value
+        except Exception:
+            u17 = None
+        try:
+            u43 = ws.acell("U43").value
+        except Exception:
+            u43 = None
+        return u17, u43
+
+    def _read_matchup_block(self, ws):
+        """
+        Reads the matchup labels and values from the player's worksheet.
+        Labels: Q36:Q42 (7 rows)
+        Values: T36:T42 (7 rows)
+        Returns: list[tuple[label, value]]
+        """
+        labels = ws.get("Q36:Q42") or []
+        values = ws.get("T36:T42") or []
+        # Flatten and pad
+        labels = [(r[0] if r else "") for r in labels]
+        values = [(r[0] if r else "") for r in values]
+        # Ensure 7
+        if len(labels) < 7: labels += [""] * (7 - len(labels))
+        if len(values) < 7: values += [""] * (7 - len(values))
+        return list(zip(labels[:7], values[:7]))
+
+    def _read_enemy_health(self, enemy_row: int) -> float | None:
+        """Return the enemy health (column C) as a float, or None if blank/invalid."""
+        ws = self._enemy_ws()
+        val = None
+        try:
+            v = ws.acell(f"C{enemy_row}").value
+            val = float(v.replace(",", "")) if v else None
+        except Exception:
+            pass
+        return val
+
+    def _compute_h2k(self, total_final_dmg: str | None, enemy_health: float | None) -> int | None:
+        """
+        Compute the number of hits needed to kill (ceil(health / damage)).
+        Returns None if either value is missing or non-numeric.
+        """
+        if not total_final_dmg or not enemy_health:
+            return None
+        try:
+            dmg = float(str(total_final_dmg).replace(",", ""))
+            if dmg <= 0:
+                return None
+            return math.ceil(enemy_health / dmg)
+        except Exception:
+            return None
 
     # ====== Weapon / Gem / Attack choices from "Weapon Data" ======
 
@@ -532,6 +631,90 @@ class BloodborneCog(commands.Cog):
     # ---------- slash commands ----------
 
     @app_commands.command(
+        name="bb_matchup",
+        description="Pick an enemy to apply matchup values and show your damage & H2K."
+    )
+    @app_commands.describe(
+        enemy="Select an enemy (from enemydata A3:A296 with its location)."
+    )
+    async def bb_matchup(
+        self,
+        interaction: discord.Interaction,
+        enemy: str
+    ):
+        await interaction.response.defer(ephemeral=False)
+        ws_player = self._ensure_user_tab(interaction.user.id)
+
+        # Parse row index
+        try:
+            row_index = int(enemy)
+        except Exception:
+            await interaction.followup.send("Couldn't parse the selected enemy. Please pick from the suggestions.", ephemeral=True)
+            return
+
+        # Apply matchup (F..L -> T36..T42)
+        self._apply_enemy_matchup(ws_player, row_index)
+
+        # Fetch enemy info
+        ws_e = self._enemy_ws()
+        name_loc = ws_e.get(f"A{row_index}:B{row_index}") or [[]]
+        enemy_name = (name_loc[0][0] if name_loc and name_loc[0] else "") or "Unknown"
+        enemy_loc  = (name_loc[0][1] if name_loc and len(name_loc[0]) > 1 else "")
+        label = f"{enemy_name} ({enemy_loc})" if enemy_loc else enemy_name
+
+        # --- NEW: get enemy health & compute hits to kill ---
+        enemy_health = self._read_enemy_health(row_index)
+
+        # Damage from player sheet
+        phys_unmitigated, total_final = self._read_damage_summary(ws_player)
+
+        # Calculate hits-to-kill
+        h2k = self._compute_h2k(total_final, enemy_health)
+
+        # Read matchup (Q36–Q42, T36–T42)
+        matchup = self._read_matchup_block(ws_player)
+        matchup_lines = [f"{lab or '—'}: **{val or '—'}**" for lab, val in matchup]
+        matchup_md = "\n".join(matchup_lines) if matchup_lines else "—"
+
+        # Build embed
+        user = interaction.user
+        em = discord.Embed(
+            title=f"🩸 {user.display_name}'s Matchup",
+            description=f"Applied **{label}** matchup values (T36–T42).",
+            color=0x8A0303
+        )
+        em.add_field(name="Matchup", value=matchup_md, inline=False)
+        em.add_field(
+            name="Damage",
+            value=(
+                f"🎯 **Total Final Dmg (U43):** {total_final or '—'}"
+            ),
+            inline=False
+        )
+
+        # Show H2K if both values exist
+        if enemy_health is not None and h2k is not None:
+            em.add_field(
+                name="H2K (Hits to Kill)",
+                value=f"❤️ Enemy Health: **{int(enemy_health)}**\n💥 Hits Required: **{h2k}**",
+                inline=False
+            )
+        else:
+            em.add_field(name="H2K (Hits to Kill)", value="—", inline=False)
+
+        await interaction.followup.send(embed=em)
+
+    @bb_matchup.autocomplete("enemy")
+    async def bb_matchup_enemy_autocomplete(self, interaction: discord.Interaction, current: str):
+        # Produce up to 25 matching "Name (Location)" labels, with value = row index (string)
+        cur = (current or "").lower()
+        items = self._get_enemy_choices()
+        if cur:
+            items = [(label, row) for (label, row) in items if cur in label.lower()]
+        items = items[:25]
+        return [app_commands.Choice(name=label, value=str(row)) for (label, row) in items]
+
+    @app_commands.command(
         name="bb_weapon",
         description="Choose weapon, gems, and an attack; shows PhysAtk & Total Final Dmg."
     )
@@ -683,8 +866,7 @@ class BloodborneCog(commands.Cog):
         em.add_field(name="Loadout", value=selections, inline=False)
 
         dmg_md = (
-            f"⚔️ **Unmitigated PhysAtk (U17):** {phys_unmitigated or '—'}\n"
-            f"🎯 **Total Final Dmg (U43):** {total_final or '—'}"
+            f"⚔️ **Unmitigated PhysAtk (U17):** {phys_unmitigated or '—'}"
         )
         em.add_field(name="Damage", value=dmg_md, inline=False)
 
