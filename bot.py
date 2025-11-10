@@ -667,7 +667,7 @@ class BloodborneCog(commands.Cog):
         )
 
         selections = (
-            f"🗡️ **Weapon:** {q17 or '—'}\n"
+            f"🗡️ **R-Hand Weapon:** {q17 or '—'}\n"
             f"💥 **Attack:** {r19 or '—'}\n"
             f"💎 **Gems:**\n"
             f"• Gem 1 Primary: {gems_now[0] or '—'}\n"
