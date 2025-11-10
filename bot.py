@@ -76,6 +76,101 @@ class BloodborneCog(commands.Cog):
 
     # ---------- helpers ----------
 
+    # ====== Weapon / Gem / Attack choices from "Weapon Data" ======
+
+    def _get_weapon_choices(self) -> list[str]:
+        ws = self.sh.worksheet("Weapon Data")
+        col = ws.get("A2:A43") or []
+        return [r[0] for r in col if r and r[0]]
+
+    def _get_gem_choices(self) -> list[str]:
+        ws = self.sh.worksheet("Weapon Data")
+        col = ws.get("AJ2:AJ32") or []
+        return [r[0] for r in col if r and r[0]]
+
+    def _get_attack_choices(self) -> list[str]:
+        """
+        Row B45:BN45; return only non-empty cells.
+        """
+        ws = self.sh.worksheet("Weapon Data")
+        row = ws.get("B45:BN45") or [[]]
+        cells = row[0] if row else []
+        return [c for c in cells if c]
+
+    # ====== Write weapon, gems, attack to the player's worksheet ======
+
+    def _set_weapon_gems_attack(
+        self, ws,
+        weapon: str | None,
+        gems: list[str | None],   # length up to 9, order: G1 Prim, G1 Sec, G1 C/T, G2 Prim, G2 Sec, G2 C/T, G3 Prim, G3 Sec, G3 C/T
+        attack: str | None,
+        gem_ct_kinds: tuple[str | None, str | None, str | None] | None = None  # ("Curse"/"Tertiary"/None) x 3
+    ):
+        """
+        Writes:
+        - Q17 = weapon
+        - S21:S29 = 9 gem values (Primary, Secondary, Curse/Tertiary for each Gem 1..3)
+        - R19 = attack
+        - Q23/Q26/Q29 = "Gem X Curse" or "Gem X Tertiary" depending on gem_ct_kinds
+
+        Passing None for any slot preserves the existing value on the sheet.
+        """
+        # --- Weapon ---
+        if weapon is not None:
+            ws.update("Q17", [[weapon]], value_input_option="USER_ENTERED")
+
+        # --- Gems S21:S29 (9 rows) ---
+        current_gems = ws.get("S21:S29") or []
+        def cur_g(i):
+            try:
+                return current_gems[i][0]
+            except Exception:
+                return ""
+        padded = (gems + [None] * 9)[:9]
+        values = [[(padded[i] if padded[i] is not None else cur_g(i))] for i in range(9)]
+        ws.update("S21:S29", values, value_input_option="USER_ENTERED")
+
+        # --- Attack R19 ---
+        if attack is not None:
+            ws.update("R19", [[attack]], value_input_option="USER_ENTERED")
+
+        # --- Curse/Tertiary labels Q23 (Gem1), Q26 (Gem2), Q29 (Gem3) ---
+        if gem_ct_kinds is not None:
+            # Read current so None preserves
+            current_q = ws.get("Q23:Q29") or []  # this gives Q23..Q29; we’ll only use rows 1,4,7 (0-index 0,3,6) for Q23/Q26/Q29 fetch fallback
+            def cur_q_cell(a1):
+                # small helper to read single existing value safely
+                try:
+                    return ws.acell(a1).value
+                except Exception:
+                    return ""
+
+            g1_kind, g2_kind, g3_kind = gem_ct_kinds
+
+            # Build write list for the three cells (preserve when None)
+            if g1_kind is not None:
+                ws.update("Q23", [[f"Gem 1 {g1_kind}"]], value_input_option="USER_ENTERED")
+            if g2_kind is not None:
+                ws.update("Q26", [[f"Gem 2 {g2_kind}"]], value_input_option="USER_ENTERED")
+            if g3_kind is not None:
+                ws.update("Q29", [[f"Gem 3 {g3_kind}"]], value_input_option="USER_ENTERED")
+
+    # ====== Read damage summary from the player's worksheet ======
+
+    def _read_damage_summary(self, ws) -> tuple[str | None, str | None]:
+        """
+        Returns (unmitigated_phys_atk_U17, total_final_dmg_U43)
+        """
+        try:
+            u17 = ws.acell("U17").value
+        except Exception:
+            u17 = None
+        try:
+            u43 = ws.acell("U43").value
+        except Exception:
+            u43 = None
+        return u17, u43
+
     # ===== Gear data sources =====
 
     def _get_rune_choices(self) -> list[str]:
@@ -435,6 +530,197 @@ class BloodborneCog(commands.Cog):
         return em
 
     # ---------- slash commands ----------
+
+    @app_commands.command(
+        name="bb_weapon",
+        description="Choose weapon, gems, and an attack; shows PhysAtk & Total Final Dmg."
+    )
+    @app_commands.describe(
+        weapon="Weapon (Weapon Data!A2:A43)",
+        attack="Attack (non-empty from Weapon Data!B45:BN45)",
+
+        gem1_primary="Gem 1 Primary (Weapon Data!AJ2:AJ32)",
+        gem1_secondary="Gem 1 Secondary",
+        gem1_ct_value="Gem 1 Curse/Tertiary value",
+        gem1_ct_kind="Gem 1: choose whether the 3rd slot is Curse or Tertiary",
+
+        gem2_primary="Gem 2 Primary",
+        gem2_secondary="Gem 2 Secondary",
+        gem2_ct_value="Gem 2 Curse/Tertiary value",
+        gem2_ct_kind="Gem 2: choose whether the 3rd slot is Curse or Tertiary",
+
+        gem3_primary="Gem 3 Primary",
+        gem3_secondary="Gem 3 Secondary",
+        gem3_ct_value="Gem 3 Curse/Tertiary value",
+        gem3_ct_kind="Gem 3: choose whether the 3rd slot is Curse or Tertiary",
+    )
+    @app_commands.choices(
+        gem1_ct_kind=[
+            app_commands.Choice(name="Curse", value="Curse"),
+            app_commands.Choice(name="Tertiary", value="Tertiary"),
+        ],
+        gem2_ct_kind=[
+            app_commands.Choice(name="Curse", value="Curse"),
+            app_commands.Choice(name="Tertiary", value="Tertiary"),
+        ],
+        gem3_ct_kind=[
+            app_commands.Choice(name="Curse", value="Curse"),
+            app_commands.Choice(name="Tertiary", value="Tertiary"),
+        ],
+    )
+    async def bb_weapon(
+        self,
+        interaction: discord.Interaction,
+        weapon: str | None = None,
+        attack: str | None = None,
+
+        gem1_primary: str | None = None,
+        gem1_secondary: str | None = None,
+        gem1_ct_value: str | None = None,
+        gem1_ct_kind: app_commands.Choice[str] | None = None,
+
+        gem2_primary: str | None = None,
+        gem2_secondary: str | None = None,
+        gem2_ct_value: str | None = None,
+        gem2_ct_kind: app_commands.Choice[str] | None = None,
+
+        gem3_primary: str | None = None,
+        gem3_secondary: str | None = None,
+        gem3_ct_value: str | None = None,
+        gem3_ct_kind: app_commands.Choice[str] | None = None,
+    ):
+        await interaction.response.defer(ephemeral=False)
+
+        ws = self._ensure_user_tab(interaction.user.id)
+
+        # ---- Validate against sheet lists ----
+        weapons_valid = set(self._get_weapon_choices())
+        gems_valid = set(self._get_gem_choices())
+        attacks_valid = set(self._get_attack_choices())
+
+        bad = []
+        if weapon is not None and weapon not in weapons_valid: bad.append(f"Weapon: {weapon}")
+        if attack is not None and attack not in attacks_valid: bad.append(f"Attack: {attack}")
+
+        gem_inputs_flat = [
+            gem1_primary, gem1_secondary, gem1_ct_value,
+            gem2_primary, gem2_secondary, gem2_ct_value,
+            gem3_primary, gem3_secondary, gem3_ct_value,
+        ]
+        labels_for_validation = [
+            "Gem 1 Primary", "Gem 1 Secondary", "Gem 1 Curse/Tertiary",
+            "Gem 2 Primary", "Gem 2 Secondary", "Gem 2 Curse/Tertiary",
+            "Gem 3 Primary", "Gem 3 Secondary", "Gem 3 Curse/Tertiary",
+        ]
+        for val, label in zip(gem_inputs_flat, labels_for_validation):
+            if val is not None and val not in gems_valid:
+                bad.append(f"{label}: {val}")
+
+        if bad:
+            await interaction.followup.send(
+                "Some choices aren't valid:\n• " + "\n• ".join(bad),
+                ephemeral=True
+            )
+            return
+
+        # ---- Write updates (includes Curse/Tertiary labels to Q23/Q26/Q29) ----
+        ct_tuple = (
+            gem1_ct_kind.value if gem1_ct_kind else None,
+            gem2_ct_kind.value if gem2_ct_kind else None,
+            gem3_ct_kind.value if gem3_ct_kind else None,
+        )
+        self._set_weapon_gems_attack(ws, weapon, gem_inputs_flat, attack, gem_ct_kinds=ct_tuple)
+
+        # ---- Re-read what's on the sheet (truth source) ----
+        q17 = ws.acell("Q17").value  # weapon
+        r19 = ws.acell("R19").value  # attack
+        s21_s29 = ws.get("S21:S29") or []
+        gems_now = [(r[0] if r else "") for r in s21_s29]
+        if len(gems_now) < 9:
+            gems_now += [""] * (9 - len(gems_now))
+
+        # Read the label cells to show the actual stored kind names
+        q23 = (ws.acell("Q23").value or "").lower()  # Gem 1 Curse/Tertiary
+        q26 = (ws.acell("Q26").value or "").lower()  # Gem 2 Curse/Tertiary
+        q29 = (ws.acell("Q29").value or "").lower()  # Gem 3 Curse/Tertiary
+
+        def _kind_from_cell(val: str, fallback: str) -> str:
+            if "curse" in val:
+                return "Curse"
+            if "tertiary" in val:
+                return "Tertiary"
+            return fallback
+
+        g1_kind = _kind_from_cell(q23, "Curse/Tertiary")
+        g2_kind = _kind_from_cell(q26, "Curse/Tertiary")
+        g3_kind = _kind_from_cell(q29, "Curse/Tertiary")
+
+        # ---- Damage summary outputs ----
+        phys_unmitigated, total_final = self._read_damage_summary(ws)
+
+        # ---- Build embed ----
+        user = interaction.user
+        em = discord.Embed(
+            title=f"🩸 {user.display_name}'s Weapon & Gems",
+            description="Selections applied to your sheet; current damage below.",
+            color=0x8A0303
+        )
+
+        selections = (
+            f"🗡️ **Weapon:** {q17 or '—'}\n"
+            f"💥 **Attack:** {r19 or '—'}\n"
+            f"💎 **Gems:**\n"
+            f"• Gem 1 Primary: {gems_now[0] or '—'}\n"
+            f"• Gem 1 Secondary: {gems_now[1] or '—'}\n"
+            f"• Gem 1 {g1_kind}: {gems_now[2] or '—'}\n"
+            f"• Gem 2 Primary: {gems_now[3] or '—'}\n"
+            f"• Gem 2 Secondary: {gems_now[4] or '—'}\n"
+            f"• Gem 2 {g2_kind}: {gems_now[5] or '—'}\n"
+            f"• Gem 3 Primary: {gems_now[6] or '—'}\n"
+            f"• Gem 3 Secondary: {gems_now[7] or '—'}\n"
+            f"• Gem 3 {g3_kind}: {gems_now[8] or '—'}"
+        )
+        em.add_field(name="Loadout", value=selections, inline=False)
+
+        dmg_md = (
+            f"⚔️ **Unmitigated PhysAtk (U17):** {phys_unmitigated or '—'}\n"
+            f"🎯 **Total Final Dmg (U43):** {total_final or '—'}"
+        )
+        em.add_field(name="Damage", value=dmg_md, inline=False)
+
+        await interaction.followup.send(embed=em)
+
+    # ---- Weapon ----
+    @bb_weapon.autocomplete("weapon")
+    async def bb_weapon_weapon_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_weapon_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
+
+    # ---- Attack ----
+    @bb_weapon.autocomplete("attack")
+    async def bb_weapon_attack_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_attack_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
+
+    # ---- Gems: every gem value field pulls from the same list ----
+    @bb_weapon.autocomplete("gem1_primary")
+    @bb_weapon.autocomplete("gem1_secondary")
+    @bb_weapon.autocomplete("gem1_ct_value")
+    @bb_weapon.autocomplete("gem2_primary")
+    @bb_weapon.autocomplete("gem2_secondary")
+    @bb_weapon.autocomplete("gem2_ct_value")
+    @bb_weapon.autocomplete("gem3_primary")
+    @bb_weapon.autocomplete("gem3_secondary")
+    @bb_weapon.autocomplete("gem3_ct_value")
+    async def bb_weapon_gem_autocomplete(self, interaction: discord.Interaction, current: str):
+        choices = self._get_gem_choices()
+        cur = (current or "").lower()
+        filtered = [c for c in choices if cur in c.lower()] if cur else choices
+        return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
 
     @app_commands.command(
         name="bb_gear",
